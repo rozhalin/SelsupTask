@@ -1,92 +1,127 @@
 package com.example.demo;
 
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Getter;
 import org.apache.commons.lang3.concurrent.TimedSemaphore;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.time.LocalDate;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 public class CrptApi {
     private static CrptApi INSTANCE;
-    private static TimedSemaphore semaphore;
+    private TimedSemaphore semaphore;
+    private Requestable httpClient;
+    private ApiOptions apiOptions;
+    private static final HashMap<String, String> createDocumentHeaders = new HashMap<>() {
+        {
+            put(Constants.Http.CONTENT_TYPE_HEADER_NAME, Constants.Http.JSON_MIME_TYPE_UTF8);
+            put(Constants.Http.ACCEPT_HEADER_NAME, Constants.Http.JSON_MIME_TYPE);
+        }
+    };
 
-    private CrptApi(long timePeriod, TimeUnit timeUnit, int requestLimit) {
-        CrptApi.semaphore = new TimedSemaphore(timePeriod, timeUnit, requestLimit);
+    private static final class Constants {
+        public static final class Http {
+            public static final String CONTENT_TYPE_HEADER_NAME = "Content-Type";
+            public static final String ACCEPT_HEADER_NAME = "Accept";
+            public static final String JSON_MIME_TYPE_UTF8 = "application/json;charset=UTF-8";
+            public static final String JSON_MIME_TYPE = "application/json";
+        }
     }
 
+    private CrptApi(
+            long timePeriod,
+            TimeUnit timeUnit,
+            int requestLimit,
+            Requestable httpClient,
+            ApiOptions apiOptions) {
+        this.semaphore = new TimedSemaphore(timePeriod, timeUnit, requestLimit);
+        this.httpClient = httpClient;
+        this.apiOptions = apiOptions;
+    }
 
-
-    public static CrptApi getInstance(long timePeriod, TimeUnit timeUnit, int requestLimit) {
+    public synchronized static CrptApi getInstance(
+            long timePeriod,
+            TimeUnit timeUnit,
+            int requestLimit,
+            Requestable httpClient,
+            ApiOptions apiOptions) {
         if (INSTANCE == null) {
-            INSTANCE = new CrptApi(timePeriod, timeUnit, requestLimit);
+            INSTANCE = new CrptApi(timePeriod, timeUnit, requestLimit, httpClient, apiOptions);
         }
         return INSTANCE;
     }
 
-    public String createDocument(Document document) throws IOException {
-        return Connection.createDocument(document, Connection.authorize());
+    public HttpRequestResult createDocument(Document document)
+            throws URISyntaxException, IOException, InterruptedException {
+        //todo toString() -> toJson()
+        byte[] data = document.toString().getBytes();
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
+                .uri(HttpUtils.getUri(apiOptions.baseUrl, apiOptions.createDocumentUrn))
+                .POST(HttpRequest.BodyPublishers.ofByteArray(data));
+        HttpUtils.withHeaders(requestBuilder, createDocumentHeaders);
+        HttpRequest request = requestBuilder.build();
+        HttpResponse<String> response = httpClient.request(request);
+
+        return new HttpRequestResult(response.body(), response.statusCode());
     }
 
-    private static class Connection {
-        static final String ROOT_ADDRESS = "https://ismp.crpt.ru/";
+    public class HttpRequestResult {
+        String body;
+        int statusCode;
 
-        public static String authorize() {
-            return "signature";
+        public HttpRequestResult(String body, int statusCode) {
+            this.body = body;
+            this.statusCode = statusCode;
         }
-
-        public static String createDocument(Document document, String signature) throws IOException {
-            URL url = new URL(ROOT_ADDRESS + "api/v3/lk/documents/create");
-
-            while (!semaphore.tryAcquire()) ;
-
-            /*HttpURLConnection connection = getConnection(url, "POST");
-            setAuthorization(connection, signature);
-
-            try (OutputStream os = connection.getOutputStream()) {
-                byte[] input = document.toString().getBytes(StandardCharsets.UTF_8);
-                os.write(input, 0, input.length);
-            }*/
-
-            StringBuilder response = new StringBuilder();
-            /*try (BufferedReader br = new BufferedReader(
-                    new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
-                String responseLine;
-                while ((responseLine = br.readLine()) != null) {
-                    response.append(responseLine.trim());
-                }
-            }*/
-
-            return response.toString();
-        }
-
-        private static HttpURLConnection getConnection(URL url, String method) throws IOException {
-            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-            connection.setRequestMethod(method);
-            connection.setRequestProperty("Content-Type", "application/json");
-            connection.setRequestProperty("Accept", "application/json");
-            connection.setDoOutput(true);
-            return connection;
-        }
-
-        private static void setAuthorization(HttpURLConnection connection, String signature) {
-            connection.setRequestProperty("Authorization", "Bearer " + signature);
-        }
-
     }
 
-    @Getter
+    public static class HttpUtils {
+        public static URI getUri(String url, String urn) throws URISyntaxException {
+            return new URI(url + "/" + urn);
+        }
+
+        public static HttpRequest.Builder withHeaders(HttpRequest.Builder builder, HashMap<String, String> headers) {
+            headers.forEach(builder::header);
+            return builder;
+        }
+    }
+
+    public static class ApiOptions {
+        private final String baseUrl;
+        private final String createDocumentUrn;
+
+        public ApiOptions(String baseUrl, String createDocumentUrn) {
+            this.baseUrl = baseUrl;
+            this.createDocumentUrn = createDocumentUrn;
+        }
+
+        public String getBaseUrl() {
+            return baseUrl;
+        }
+
+        public String getCreateDocumentUrn() {
+            return createDocumentUrn;
+        }
+    }
+
+    public class ApiClient implements Requestable {
+        public HttpResponse<String> request(HttpRequest request) throws IOException, InterruptedException {
+            return HttpClient.newBuilder()
+                    .build()
+                    .send(request, HttpResponse.BodyHandlers.ofString());
+        }
+    }
+
+    public interface Requestable {
+        HttpResponse<String> request(HttpRequest request) throws IOException, InterruptedException;
+    }
+
     public enum DocType {
 
         LP_INTRODUCE_GOODS(109);
@@ -101,6 +136,11 @@ public class CrptApi {
 
     public static class Document {
         private HashMap<String, String> description;
+
+        public void setDoc_id(String doc_id) {
+            this.doc_id = doc_id;
+        }
+
         private String doc_id;
         private String doc_status;
         private DocType docType;
@@ -115,7 +155,7 @@ public class CrptApi {
         private String reg_number;
     }
 
-    public static class Product {
+    public class Product {
         private String certificate_document;
         private LocalDate certificate_document_date;
         private String certificate_document_number;
