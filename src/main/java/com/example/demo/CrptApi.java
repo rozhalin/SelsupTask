@@ -1,5 +1,8 @@
 package com.example.demo;
 
+import com.fasterxml.jackson.annotation.JsonAutoDetect;
+import com.fasterxml.jackson.annotation.PropertyAccessor;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.concurrent.TimedSemaphore;
 
 import java.io.IOException;
@@ -18,7 +21,8 @@ public class CrptApi {
     private TimedSemaphore semaphore;
     private Requestable httpClient;
     private ApiOptions apiOptions;
-    private static final HashMap<String, String> createDocumentHeaders = new HashMap<>() {
+    private ObjectMapper mapper = new ObjectMapper().setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY);
+    private static final HashMap<String, String> REQUEST_HEADERS = new HashMap<>() {
         {
             put(Constants.Http.CONTENT_TYPE_HEADER_NAME, Constants.Http.JSON_MIME_TYPE_UTF8);
             put(Constants.Http.ACCEPT_HEADER_NAME, Constants.Http.JSON_MIME_TYPE);
@@ -57,14 +61,31 @@ public class CrptApi {
         return INSTANCE;
     }
 
-    public HttpRequestResult createDocument(Document document)
+    public HttpRequestResult authorize() throws InterruptedException, URISyntaxException, IOException {
+        semaphore.acquire();
+
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
+                .uri(HttpUtils.getUri(apiOptions.baseUrl, apiOptions.authorizeUrn))
+                .GET();
+        HttpUtils.withHeaders(requestBuilder, REQUEST_HEADERS);
+
+        HttpRequest request = requestBuilder.build();
+        HttpResponse<String> response = httpClient.request(request);
+
+        return new HttpRequestResult(response.body(), response.statusCode());
+    }
+
+    public HttpRequestResult createDocument(Document document, String signature)
             throws URISyntaxException, IOException, InterruptedException {
-        //todo toString() -> toJson()
-        byte[] data = document.toString().getBytes();
+        semaphore.acquire();
+
+        String body = mapper.writeValueAsString(document);
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                 .uri(HttpUtils.getUri(apiOptions.baseUrl, apiOptions.createDocumentUrn))
-                .POST(HttpRequest.BodyPublishers.ofByteArray(data));
-        HttpUtils.withHeaders(requestBuilder, createDocumentHeaders);
+                .POST(HttpRequest.BodyPublishers.ofString(body));
+        HttpUtils.withHeaders(requestBuilder, REQUEST_HEADERS);
+        requestBuilder.header("Authorization", signature);
+
         HttpRequest request = requestBuilder.build();
         HttpResponse<String> response = httpClient.request(request);
 
@@ -95,10 +116,12 @@ public class CrptApi {
     public static class ApiOptions {
         private final String baseUrl;
         private final String createDocumentUrn;
+        private final String authorizeUrn;
 
-        public ApiOptions(String baseUrl, String createDocumentUrn) {
+        public ApiOptions(String baseUrl, String createDocumentUrn, String authorizeUrn) {
             this.baseUrl = baseUrl;
             this.createDocumentUrn = createDocumentUrn;
+            this.authorizeUrn = authorizeUrn;
         }
 
         public String getBaseUrl() {
@@ -107,6 +130,10 @@ public class CrptApi {
 
         public String getCreateDocumentUrn() {
             return createDocumentUrn;
+        }
+
+        public String getAuthorizeUrn() {
+            return authorizeUrn;
         }
     }
 
@@ -135,12 +162,12 @@ public class CrptApi {
     }
 
     public static class Document {
-        private HashMap<String, String> description;
-
-        public void setDoc_id(String doc_id) {
+        public Document(String doc_id, List<Product> products) {
             this.doc_id = doc_id;
+            this.products = products;
         }
 
+        private HashMap<String, String> description;
         private String doc_id;
         private String doc_status;
         private DocType docType;
@@ -155,7 +182,11 @@ public class CrptApi {
         private String reg_number;
     }
 
-    public class Product {
+    public static class Product {
+        public Product(String uit_code) {
+            this.uit_code = uit_code;
+        }
+
         private String certificate_document;
         private LocalDate certificate_document_date;
         private String certificate_document_number;
